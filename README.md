@@ -4,7 +4,7 @@ A local browser app for pricing visible Path of Exile 2 screenshot text without 
 
 The app is intentionally simple:
 
-1. You paste, drop, or upload a screenshot in the local page.
+1. You paste, drop, or upload 1 to 4 screenshots in the local page.
 2. EasyOCR reads text from the image.
 3. The OCR lines are cleaned and filtered.
 4. Poe2Scout's item list for the selected realm and league is fetched once and cached.
@@ -36,6 +36,8 @@ This app can price items that exist in Poe2Scout's item list for the selected le
 - Omens
 - Fragments
 - Other Poe2Scout-supported item categories
+
+Skill gems and support gems are not priced through this app. They are not on the currency exchange, so OCR rows like `Skill: Repulsion` or `Support: Concussive Runes` are classified as `Trade only` and shown with a note to check trade instead. Poe2Scout gem categories such as `lineagesupportgems` are also treated as `Trade only` if OCR accidentally matches them.
 
 It does not inspect rare item affixes, calculate DPS, evaluate rolls, or query the official trade site for comparable rare items. A rare item may match only by base name, which is not enough for real rare-gear pricing.
 
@@ -80,9 +82,10 @@ First OCR use may download EasyOCR model files. This can take a little while and
 1. Open the local page.
 2. In Path of Exile 2, take a screenshot or use Print Screen.
 3. Click the local page.
-4. Press Ctrl+V, drop an image, or use Upload.
-5. Confirm the screenshot preview appears.
-6. Click Price.
+4. Press Ctrl+V, drop images, or use Upload.
+5. Add up to 4 screenshots to the current batch.
+6. Click Price or press Enter.
+7. Click Clear when you want a blank slate for the next batch.
 
 The result table shows:
 
@@ -93,6 +96,8 @@ The result table shows:
 | Price | `CurrentPrice` from Poe2Scout for the selected league. |
 | Category | `CategoryApiId` from Poe2Scout. |
 | Confidence | RapidFuzz `WRatio` score, rounded in the UI. |
+
+For skill/support gem rows, the table shows `Trade only` and a note instead of a Poe2Scout price.
 
 Rows below the review threshold are highlighted and returned with `needs_review: true`. Rows can also be marked for review when the fuzzy score is high but the OCR text and matched item do not share enough meaningful tokens. They are shown so you can inspect weak matches instead of the app silently hiding uncertainty.
 
@@ -176,6 +181,8 @@ OCR text is normalized by:
 
 Matches use RapidFuzz `fuzz.WRatio`. Results are sorted by confidence descending and capped at 50 rows.
 
+Before fuzzy matching, rows beginning with `Skill:` or `Support:` are classified as `Trade only`. After fuzzy matching, matched skill/support gem categories are also converted to `Trade only` rows with no price. This prevents skill/support gem names from being matched against unrelated currency-exchange items or shown as currency-exchange prices.
+
 After fuzzy matching, the app also checks meaningful token alignment. Generic words such as `skill`, `support`, `rune`, `runes`, `of`, `the`, and `pile` do not count as strong evidence by themselves. This prevents lines like `Skill: Repulsion` from being treated as a confident match for an unrelated item such as `Vilenta's Propulsion`.
 
 ## HTTP API
@@ -190,7 +197,7 @@ Multipart form fields:
 
 | Field | Required | Description |
 | --- | --- | --- |
-| `image` | Yes | Image file. Must have an image content type and be readable by Pillow. |
+| `image` | Yes | One to four image files. Repeat this multipart field once per image. Each file must have an image content type and be readable by Pillow. |
 | `realm` | No | Defaults to `poe2`; blank values are reset to the default. |
 | `league` | No | Defaults to `Runes of Aldur`; blank values are reset to the default. |
 | `min_score` | No | Integer from 1 to 100. Defaults to 80. |
@@ -201,6 +208,7 @@ Response shape:
 {
   "realm": "poe2",
   "league": "Runes of Aldur",
+  "image_count": 1,
   "item_count": 1266,
   "ocr_lines": ["Chaos Orb"],
   "results": [
@@ -215,6 +223,7 @@ Response shape:
       "icon_url": "https://...",
       "alignment_ok": true,
       "confidence": 100.0,
+      "source": "poe2scout",
       "needs_review": false
     }
   ]
@@ -302,7 +311,7 @@ league: Runes of Aldur
 
 ### Results look wrong
 
-OCR can misread game fonts. Use the OCR Lines panel to see what the model actually saw, then inspect rows with low confidence. The app is designed to flag weak matches rather than pretend they are certain.
+OCR can misread game fonts. Use the OCR Lines panel to see what the model actually saw, then inspect rows with low confidence. The app is designed to flag weak matches rather than pretend they are certain. Skill and support gems are deliberately marked as `Trade only` because they are not currency-exchange price entries.
 
 ### No rare gear price
 
@@ -333,4 +342,4 @@ Check installed dependencies:
 
 The live endpoint was smoke-tested by posting a generated image containing `Chaos Orb`. EasyOCR read it imperfectly as `ChacsOrb`, and RapidFuzz still matched it to Poe2Scout's `Chaos Orb` with confidence around 82.
 
-An in-game list screenshot containing rows such as `Skill: Conductive Runes`, `Skill: Repulsion`, and `Verisium Pile` was also tested. EasyOCR read the main row text, but Poe2Scout had no entries for the skill/support names. `Verisium Pile` matched cleanly to `Verisium`; the skill/support rows were marked `needs_review: true`.
+An in-game list screenshot containing rows such as `Skill: Conductive Runes`, `Skill: Repulsion`, and `Verisium Pile` was also tested. EasyOCR read the main row text. `Verisium Pile` matched cleanly to `Verisium`; the skill/support rows were classified as `Trade only` instead of being fuzzy-matched against unrelated Poe2Scout items.
