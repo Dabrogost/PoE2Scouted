@@ -343,3 +343,8 @@ Check installed dependencies:
 The live endpoint was smoke-tested by posting a generated image containing `Chaos Orb`. EasyOCR read it imperfectly as `ChacsOrb`, and RapidFuzz still matched it to Poe2Scout's `Chaos Orb` with confidence around 82.
 
 An in-game list screenshot containing rows such as `Skill: Conductive Runes`, `Skill: Repulsion`, and `Verisium Pile` was also tested. EasyOCR read the main row text. `Verisium Pile` matched cleanly to `Verisium`; the skill/support rows were classified as `Trade only` instead of being fuzzy-matched against unrelated Poe2Scout items.
+
+## License
+
+This project is licensed under the GNU General Public License v3.0 (GPL-3.0) - see the [LICENSE](file:///c:/Users/kerns/Documents/A.)%20JS%20Projects/PoE2Scouted/LICENSE) file for details.
+
