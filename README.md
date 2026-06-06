@@ -1,3 +1,13 @@
+---
+title: PoE2Scouted
+emoji: 🔎
+colorFrom: gray
+colorTo: yellow
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # PoE2 Screenshot Pricer
 
 A local browser app for pricing visible Path of Exile 2 screenshot text without a game overlay.
