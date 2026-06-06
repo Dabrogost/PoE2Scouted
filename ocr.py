@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -13,8 +14,12 @@ class OCREngineError(RuntimeError):
     pass
 
 
-BASE_DIR = Path(__file__).resolve().parent
-MODEL_DIR = BASE_DIR / ".cache" / "easyocr"
+MODEL_DIR = Path(
+    os.getenv(
+        "EASYOCR_MODEL_DIR",
+        str(Path.home() / ".cache" / "easyocr"),
+    )
+)
 
 
 def extract_text_lines(image_bytes: bytes) -> list[str]:

@@ -4,9 +4,12 @@ RUN useradd -m -u 1000 user
 
 ENV HOME=/home/user \
     PATH=/home/user/.local/bin:$PATH \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    EASYOCR_MODEL_DIR=/home/user/.cache/easyocr
 
 WORKDIR $HOME/app
+
+RUN mkdir -p $HOME/.cache/easyocr && chown -R user:user $HOME/.cache $HOME/app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
