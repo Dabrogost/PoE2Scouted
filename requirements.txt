@@ -1,0 +1,9 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+requests==2.32.3
+rapidfuzz==3.11.0
+pandas==2.2.3
+Pillow==11.1.0
+easyocr==1.7.2
+numpy==2.2.1
