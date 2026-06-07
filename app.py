@@ -4,12 +4,13 @@ import io
 import re
 from typing import Annotated, Any
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import HTMLResponse
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel
+from rapidfuzz import fuzz
 
-from matcher import match_ocr_lines
+from matcher import match_ocr_lines, normalize_text
 from ocr import OCREngineError, extract_text_lines
 from poe2scout import Poe2ScoutError, fetch_item_data, load_item_snapshot
 
@@ -35,6 +36,24 @@ class PriceResponse(BaseModel):
     lexicon_item_count: int
     ocr_lines: list[str]
     results: list[dict[str, Any]]
+
+
+class ItemSuggestion(BaseModel):
+    text: str
+    category: str | None
+    price: float | None
+    icon_url: str | None
+    score: float
+
+
+class SuggestionResponse(BaseModel):
+    realm: str
+    league: str
+    query: str
+    item_count: int
+    price_data_source: str
+    price_data_age_seconds: float | None
+    suggestions: list[ItemSuggestion]
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -78,21 +97,100 @@ async def price_screenshot(
         ocr_lines: list[str] = []
         for image_bytes in image_payloads:
             ocr_lines.extend(extract_text_lines(image_bytes))
-        item_data = fetch_item_data(realm=realm, league=league)
-        items = item_data.items
-        snapshot_items = load_item_snapshot(realm=realm, league=league)
+        return price_text_lines(
+            ocr_lines,
+            realm=realm,
+            league=league,
+            min_score=min_score,
+            image_count=len(image_payloads),
+        )
     except OCREngineError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Poe2ScoutError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    results = match_ocr_lines(ocr_lines, items, lexicon_items=snapshot_items, min_score=min_score)
+
+@app.post("/api/search", response_model=PriceResponse)
+async def search_item(
+    query: Annotated[str, Form()],
+    realm: Annotated[str, Form()] = DEFAULT_REALM,
+    league: Annotated[str, Form()] = DEFAULT_LEAGUE,
+    min_score: Annotated[int, Form(ge=1, le=100)] = DEFAULT_MIN_SCORE,
+) -> PriceResponse:
+    realm = realm.strip() or DEFAULT_REALM
+    league = league.strip() or DEFAULT_LEAGUE
+    query = query.strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Enter an item name to search.")
+
+    try:
+        item_data = fetch_item_data(realm=realm, league=league)
+        snapshot_items = load_item_snapshot(realm=realm, league=league)
+        resolved_query = resolve_manual_query(query, item_data.items, snapshot_items) or query
+        return price_text_lines(
+            [resolved_query],
+            realm=realm,
+            league=league,
+            min_score=min_score,
+            image_count=0,
+            item_data=item_data,
+            snapshot_items=snapshot_items,
+        )
+    except Poe2ScoutError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/api/suggestions", response_model=SuggestionResponse)
+def item_suggestions(
+    query: Annotated[str, Query(min_length=1)],
+    realm: str = DEFAULT_REALM,
+    league: str = DEFAULT_LEAGUE,
+    limit: Annotated[int, Query(ge=1, le=20)] = 10,
+) -> SuggestionResponse:
+    realm = realm.strip() or DEFAULT_REALM
+    league = league.strip() or DEFAULT_LEAGUE
+    query = query.strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Enter an item name to search.")
+
+    try:
+        item_data = fetch_item_data(realm=realm, league=league)
+        snapshot_items = load_item_snapshot(realm=realm, league=league)
+    except Poe2ScoutError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    return SuggestionResponse(
+        realm=realm,
+        league=league,
+        query=query,
+        item_count=len(item_data.items),
+        price_data_source=item_data.source,
+        price_data_age_seconds=item_data.age_seconds,
+        suggestions=search_item_suggestions(query, item_data.items, snapshot_items, limit=limit),
+    )
+
+
+def price_text_lines(
+    lines: list[str],
+    *,
+    realm: str,
+    league: str,
+    min_score: int,
+    image_count: int,
+    item_data: Any | None = None,
+    snapshot_items: list[dict[str, Any]] | None = None,
+) -> PriceResponse:
+    item_data = item_data or fetch_item_data(realm=realm, league=league)
+    items = item_data.items
+    if snapshot_items is None:
+        snapshot_items = load_item_snapshot(realm=realm, league=league)
+    results = match_ocr_lines(lines, items, lexicon_items=snapshot_items, min_score=min_score)
     market_info = currency_market_info(items)
 
     return PriceResponse(
         realm=realm,
         league=league,
-        image_count=len(image_payloads),
+        image_count=image_count,
         item_count=len(items),
         divine_exchange_rate_exalted=market_info["divine_exchange_rate_exalted"],
         divine_icon_url=market_info["divine_icon_url"],
@@ -100,9 +198,112 @@ async def price_screenshot(
         price_data_source=item_data.source,
         price_data_age_seconds=item_data.age_seconds,
         lexicon_item_count=len(snapshot_items) if snapshot_items else len(items),
-        ocr_lines=ocr_lines,
+        ocr_lines=lines,
         results=results,
     )
+
+
+def resolve_manual_query(query: str, items: list[dict[str, Any]], snapshot_items: list[dict[str, Any]]) -> str | None:
+    exact_key = normalize_text(query)
+    names = searchable_item_names(items, snapshot_items)
+    if exact_key in names:
+        return names[exact_key][0]
+
+    suggestions = search_item_suggestions(query, items, snapshot_items, limit=1)
+    if not suggestions:
+        return None
+
+    best = suggestions[0]
+    return best.text if best.score >= 70 else None
+
+
+def search_item_suggestions(
+    query: str,
+    items: list[dict[str, Any]],
+    snapshot_items: list[dict[str, Any]],
+    *,
+    limit: int = 10,
+) -> list[ItemSuggestion]:
+    query_key = normalize_text(query)
+    if not query_key:
+        return []
+
+    scored: list[tuple[float, str, dict[str, Any]]] = []
+    for item_key, (name, item) in searchable_item_names(items, snapshot_items).items():
+        score = suggestion_score(query_key, item_key)
+        if score >= 70:
+            scored.append((score, name, item))
+
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [
+        ItemSuggestion(
+            text=name,
+            category=_field(item, "category_api_id", "CategoryApiId"),
+            price=_price_to_float(_field(item, "current_price", "CurrentPrice")),
+            icon_url=_icon_url(item),
+            score=score,
+        )
+        for score, name, item in scored[:limit]
+    ]
+
+
+def searchable_item_names(
+    items: list[dict[str, Any]],
+    snapshot_items: list[dict[str, Any]],
+) -> dict[str, tuple[str, dict[str, Any]]]:
+    names: dict[str, tuple[str, dict[str, Any]]] = {}
+    for item in [*snapshot_items, *items]:
+        name = item_search_name(item)
+        key = normalize_text(name)
+        if key:
+            names[key] = (name, item)
+
+    return names
+
+
+def item_search_name(item: dict[str, Any]) -> str:
+    text = _field(item, "text", "Text")
+    name = _field(item, "name", "Name")
+    item_type = _field(item, "type", "Type")
+
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+    if isinstance(name, str) and isinstance(item_type, str):
+        return f"{name} {item_type}".strip()
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    if isinstance(item_type, str) and item_type.strip():
+        return item_type.strip()
+
+    return ""
+
+
+def suggestion_score(query_key: str, item_key: str) -> float:
+    query_tokens = query_key.split()
+    item_tokens = item_key.split()
+    if not query_tokens or not item_tokens:
+        return 0.0
+
+    if query_key == item_key:
+        return 120.0
+    if item_key.startswith(query_key):
+        return 115.0 - min(len(item_key) - len(query_key), 20) * 0.1
+    if any(token.startswith(query_key) for token in item_tokens):
+        return 110.0
+    if all(any(token.startswith(query_token) for token in item_tokens) for query_token in query_tokens):
+        return 105.0
+    if query_key in item_key:
+        return 95.0
+
+    token_scores = [
+        max(fuzz.ratio(query_token, item_token) for item_token in item_tokens)
+        for query_token in query_tokens
+    ]
+    if token_scores and min(token_scores) >= 82:
+        return 82.0 + min(token_scores) * 0.1
+
+    fuzzy_score = float(fuzz.WRatio(query_key, item_key))
+    return fuzzy_score if len(query_key) >= 6 and fuzzy_score >= 85 else 0.0
 
 
 def currency_market_info(items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -308,6 +509,24 @@ HTML = """
     .dropzone.is-dragover {
       border-color: var(--accent);
       background: var(--accent-soft);
+    }
+
+    .manual-search {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: end;
+      margin: -4px 0 18px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-3);
+    }
+
+    #manualSearchButton:not(:disabled) {
+      border-color: #7c6a3f;
+      background: #191714;
+      color: #f4d997;
     }
 
     #emptyState {
@@ -552,6 +771,8 @@ HTML = """
       header { align-items: start; gap: 12px; }
       .controls { grid-template-columns: 1fr; padding: 12px; }
       .controls button { width: 100%; }
+      .manual-search { grid-template-columns: 1fr; padding: 12px; }
+      .manual-search button { width: 100%; }
       .file-button { width: 100%; }
       table { min-width: 720px; }
       .lines { max-height: 260px; }
@@ -563,6 +784,7 @@ HTML = """
       .muted { font-size: 13px; }
       .controls { gap: 9px; padding: 10px; }
       .dropzone { min-height: 145px; padding: 12px; }
+      .manual-search { gap: 9px; padding: 10px; }
       .preview-grid { grid-template-columns: minmax(0, 180px); }
       .market-rate { width: 100%; }
       .rate-icon { width: 22px; height: 22px; }
@@ -617,6 +839,14 @@ HTML = """
       <div id="previewGrid" class="preview-grid" aria-label="Selected screenshot previews"></div>
     </section>
 
+    <section class="manual-search">
+      <label>Item search
+        <input id="manualSearchInput" type="text" list="manualSearchSuggestions" autocomplete="off" placeholder="Divine Orb">
+        <datalist id="manualSearchSuggestions"></datalist>
+      </label>
+      <button id="manualSearchButton" type="button" disabled>Search</button>
+    </section>
+
     <div id="status" class="status" role="status" aria-live="polite">
       <span class="status-spinner" aria-hidden="true"></span>
       <span id="statusText"></span>
@@ -628,7 +858,7 @@ HTML = """
         <table>
           <thead>
             <tr>
-              <th>OCR text</th>
+              <th>Input text</th>
               <th>Matched item</th>
               <th>Price (exalted)</th>
               <th>Category</th>
@@ -641,7 +871,7 @@ HTML = """
         </table>
       </div>
       <aside>
-        <h2>OCR Lines</h2>
+        <h2 id="linesTitle">OCR Lines</h2>
         <div id="ocrLines" class="lines">
           <div class="muted">Extracted text appears here.</div>
         </div>
@@ -654,6 +884,9 @@ HTML = """
     const dropzone = document.querySelector("#dropzone");
     const previewGrid = document.querySelector("#previewGrid");
     const emptyState = document.querySelector("#emptyState");
+    const manualSearchInput = document.querySelector("#manualSearchInput");
+    const manualSearchSuggestions = document.querySelector("#manualSearchSuggestions");
+    const manualSearchButton = document.querySelector("#manualSearchButton");
     const realmInput = document.querySelector("#realmInput");
     const leagueInput = document.querySelector("#leagueInput");
     const scoreInput = document.querySelector("#scoreInput");
@@ -663,11 +896,15 @@ HTML = """
     const statusText = document.querySelector("#statusText");
     const marketRate = document.querySelector("#marketRate");
     const resultBody = document.querySelector("#resultBody");
+    const linesTitle = document.querySelector("#linesTitle");
     const ocrLines = document.querySelector("#ocrLines");
     const maxImages = 4;
     let currentFiles = [];
     let previewUrls = [];
     let isPricing = false;
+    let hasResults = false;
+    let suggestionTimer = null;
+    let suggestionController = null;
 
     function setStatus(message, isError = false, isLoading = false) {
       statusText.textContent = message;
@@ -677,23 +914,29 @@ HTML = """
 
     function updateButtons() {
       const hasFiles = currentFiles.length > 0;
+      const hasManualQuery = manualSearchInput.value.trim().length > 0;
       priceButton.disabled = isPricing || !hasFiles;
-      clearButton.disabled = isPricing || !hasFiles;
+      manualSearchButton.disabled = isPricing || !hasManualQuery;
+      clearButton.disabled = isPricing || (!hasFiles && !hasManualQuery && !hasResults);
       fileInput.disabled = isPricing;
+      manualSearchInput.disabled = isPricing;
       realmInput.disabled = isPricing;
       leagueInput.disabled = isPricing;
       scoreInput.disabled = isPricing;
     }
 
-    function setPricingState(active) {
+    function setPricingState(active, mode = "ocr") {
       isPricing = active;
       document.body.classList.toggle("is-pricing", active);
-      priceButton.textContent = active ? "Pricing..." : "Price";
+      priceButton.textContent = active && mode === "ocr" ? "Pricing..." : "Price";
+      manualSearchButton.textContent = active && mode === "manual" ? "Searching..." : "Search";
       updateButtons();
 
       if (active) {
-        resultBody.innerHTML = `<tr class="loading-row"><td colspan="5">Pricing current screenshots...</td></tr>`;
-        ocrLines.innerHTML = `<div class="loading-line">OCR is reading the image text...</div>`;
+        hasResults = true;
+        resultBody.innerHTML = `<tr class="loading-row"><td colspan="5">${mode === "manual" ? "Searching Poe2Scout prices..." : "Pricing current screenshots..."}</td></tr>`;
+        linesTitle.textContent = mode === "manual" ? "Manual Query" : "OCR Lines";
+        ocrLines.innerHTML = `<div class="loading-line">${mode === "manual" ? "Looking up the typed item..." : "OCR is reading the image text..."}</div>`;
       }
     }
 
@@ -774,10 +1017,14 @@ HTML = """
       previewUrls.forEach((url) => URL.revokeObjectURL(url));
       previewUrls = [];
       currentFiles = [];
+      manualSearchInput.value = "";
+      manualSearchSuggestions.innerHTML = "";
+      hasResults = false;
       previewGrid.innerHTML = "";
       previewGrid.style.display = "none";
       emptyState.style.display = "block";
       resultBody.innerHTML = `<tr><td colspan="5" class="muted">No screenshot priced yet.</td></tr>`;
+      linesTitle.textContent = "OCR Lines";
       ocrLines.innerHTML = `<div class="muted">Extracted text appears here.</div>`;
       renderMarketRate();
       setStatus("");
@@ -785,6 +1032,10 @@ HTML = """
     }
 
     clearButton.addEventListener("click", clearAll);
+    manualSearchInput.addEventListener("input", () => {
+      updateButtons();
+      queueManualSuggestions();
+    });
 
     function formatPrice(price) {
       if (price === null || price === undefined || price === "") return "n/a";
@@ -862,8 +1113,11 @@ HTML = """
     }
 
     function renderResults(results) {
+      hasResults = true;
+      updateButtons();
+
       if (!results.length) {
-        resultBody.innerHTML = `<tr><td colspan="5" class="muted">No OCR rows found.</td></tr>`;
+        resultBody.innerHTML = `<tr><td colspan="5" class="muted">No input rows found.</td></tr>`;
         return;
       }
 
@@ -883,17 +1137,69 @@ HTML = """
       `).join("");
     }
 
-    function renderLines(lines) {
+    function renderLines(lines, title = "OCR Lines", emptyMessage = "No text detected.") {
+      linesTitle.textContent = title;
       if (!lines.length) {
-        ocrLines.innerHTML = `<div class="muted">No text detected.</div>`;
+        ocrLines.innerHTML = `<div class="muted">${escapeHtml(emptyMessage)}</div>`;
         return;
       }
       ocrLines.innerHTML = lines.map((line) => `<div class="line">${escapeHtml(line)}</div>`).join("");
     }
 
-    function renderRequestError() {
+    function renderRequestError(linesMessage = "OCR lines were not updated.") {
+      hasResults = true;
+      updateButtons();
       resultBody.innerHTML = `<tr><td colspan="5" class="muted">Pricing failed. Check the status message and try again.</td></tr>`;
-      ocrLines.innerHTML = `<div class="muted">OCR lines were not updated.</div>`;
+      ocrLines.innerHTML = `<div class="muted">${escapeHtml(linesMessage)}</div>`;
+    }
+
+    function pricedRowCount(payload) {
+      return payload.results.filter((row) => row.source === "poe2scout" && row.price !== null && row.price !== undefined).length;
+    }
+
+    function reviewRowCount(payload) {
+      return payload.results.filter((row) => row.needs_review).length;
+    }
+
+    function queueManualSuggestions() {
+      window.clearTimeout(suggestionTimer);
+      const query = manualSearchInput.value.trim();
+      if (!query) {
+        manualSearchSuggestions.innerHTML = "";
+        return;
+      }
+
+      suggestionTimer = window.setTimeout(() => fetchManualSuggestions(query), 120);
+    }
+
+    async function fetchManualSuggestions(query) {
+      if (suggestionController) suggestionController.abort();
+      suggestionController = new AbortController();
+
+      const params = new URLSearchParams({
+        query,
+        realm: realmInput.value.trim() || "poe2",
+        league: leagueInput.value.trim() || "Runes of Aldur",
+        limit: "12"
+      });
+
+      try {
+        const response = await fetch(`/api/suggestions?${params.toString()}`, { signal: suggestionController.signal });
+        if (!response.ok) return;
+        const payload = await response.json();
+        if (manualSearchInput.value.trim() !== query) return;
+        renderManualSuggestions(payload.suggestions || []);
+      } catch (error) {
+        if (error.name !== "AbortError") manualSearchSuggestions.innerHTML = "";
+      }
+    }
+
+    function renderManualSuggestions(suggestions) {
+      manualSearchSuggestions.innerHTML = suggestions.map((suggestion) => {
+        const price = suggestion.price === null || suggestion.price === undefined ? "" : `${formatNumber(Number(suggestion.price))} exalted`;
+        const label = [suggestion.category, price].filter(Boolean).join(" - ");
+        return `<option value="${escapeHtml(suggestion.text)}"${label ? ` label="${escapeHtml(label)}"` : ""}></option>`;
+      }).join("");
     }
 
     async function priceCurrentBatch() {
@@ -907,7 +1213,7 @@ HTML = """
       formData.append("league", leagueInput.value.trim() || "Runes of Aldur");
       formData.append("min_score", scoreInput.value || "80");
 
-      setPricingState(true);
+      setPricingState(true, "ocr");
       setStatus(`Running OCR on ${currentFiles.length} image${currentFiles.length === 1 ? "" : "s"} and fetching Poe2Scout prices...`, false, true);
 
       try {
@@ -918,8 +1224,8 @@ HTML = """
         renderResults(payload.results);
         renderLines(payload.ocr_lines);
         renderMarketRate(payload);
-        const pricedRows = payload.results.filter((row) => row.source === "poe2scout" && row.price !== null && row.price !== undefined).length;
-        const reviewRows = payload.results.filter((row) => row.needs_review).length;
+        const pricedRows = pricedRowCount(payload);
+        const reviewRows = reviewRowCount(payload);
         setStatus(`Priced ${pricedRows} row${pricedRows === 1 ? "" : "s"} from ${payload.image_count} image${payload.image_count === 1 ? "" : "s"} against ${payload.item_count} ${payload.league} items using ${priceSourceLabel(payload)}; OCR lexicon has ${payload.lexicon_item_count} items${reviewRows ? `; ${reviewRows} row${reviewRows === 1 ? "" : "s"} need review.` : "."}`);
       } catch (error) {
         renderRequestError();
@@ -929,9 +1235,49 @@ HTML = """
       }
     }
 
+    async function searchManualItem() {
+      const query = manualSearchInput.value.trim();
+      if (!query || manualSearchButton.disabled) return;
+
+      const formData = new FormData();
+      formData.append("query", query);
+      formData.append("realm", realmInput.value.trim() || "poe2");
+      formData.append("league", leagueInput.value.trim() || "Runes of Aldur");
+      formData.append("min_score", scoreInput.value || "80");
+
+      setPricingState(true, "manual");
+      setStatus(`Searching Poe2Scout prices for "${query}"...`, false, true);
+
+      try {
+        const response = await fetch("/api/search", { method: "POST", body: formData });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.detail || "Search failed.");
+
+        renderResults(payload.results);
+        renderLines(payload.ocr_lines, "Manual Query", "No manual query text.");
+        renderMarketRate(payload);
+        const pricedRows = pricedRowCount(payload);
+        const reviewRows = reviewRowCount(payload);
+        setStatus(`Priced ${pricedRows} manual search row${pricedRows === 1 ? "" : "s"} against ${payload.item_count} ${payload.league} items using ${priceSourceLabel(payload)}; OCR lexicon has ${payload.lexicon_item_count} items${reviewRows ? `; ${reviewRows} row${reviewRows === 1 ? "" : "s"} need review.` : "."}`);
+      } catch (error) {
+        renderRequestError("Manual query was not updated.");
+        setStatus(error.message, true);
+      } finally {
+        setPricingState(false, "manual");
+      }
+    }
+
     priceButton.addEventListener("click", priceCurrentBatch);
+    manualSearchButton.addEventListener("click", searchManualItem);
+    manualSearchInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return;
+      event.preventDefault();
+      event.stopPropagation();
+      searchManualItem();
+    });
 
     document.addEventListener("keydown", (event) => {
+      if (event.target === manualSearchInput) return;
       if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return;
       event.preventDefault();
       priceCurrentBatch();
