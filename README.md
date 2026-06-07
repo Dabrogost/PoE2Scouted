@@ -32,7 +32,7 @@ This is a screenshot item-name matcher, not a full rare-item valuation engine.
 | Low-confidence threshold | `80` | `app.py` |
 | Web server | `http://127.0.0.1:8000` | run command |
 | Poe2Scout cache time | 15 minutes | `poe2scout.py` |
-| Poe2Scout user agent | `local-poe2-screenshot-pricer/0.1 contact:kernskaden@gmail.com` | `poe2scout.py` |
+| Poe2Scout user agent | `poe2-screenshot-pricer/0.1 contact:dabrogost@gmail.com` | `poe2scout.py` |
 
 Important realm detail: Poe2Scout's API accepts `poe2` for this app's current league data. The more obvious `pc` value returned `400 Invalid league name` in live testing.
 
@@ -145,7 +145,7 @@ IconUrl
 Poe2Scout asks sustained API clients to include a `User-Agent` with contact information. This app sends:
 
 ```text
-local-poe2-screenshot-pricer/0.1 contact:kernskaden@gmail.com
+poe2-screenshot-pricer/0.1 contact:dabrogost@gmail.com
 ```
 
 To override it for your own contact address:

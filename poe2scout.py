@@ -12,7 +12,7 @@ import requests
 
 
 API_BASE = "https://api.poe2scout.com"
-DEFAULT_USER_AGENT = "local-poe2-screenshot-pricer/0.1 contact:kernskaden@gmail.com"
+DEFAULT_USER_AGENT = "poe2-screenshot-pricer/0.1 contact:dabrogost@gmail.com"
 DEFAULT_CACHE_SECONDS = 15 * 60
 BASE_DIR = Path(__file__).resolve().parent
 CACHE_DIR = BASE_DIR / ".cache" / "poe2scout"
