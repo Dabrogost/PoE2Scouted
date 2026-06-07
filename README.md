@@ -102,8 +102,8 @@ The result table shows:
 | Column | Meaning |
 | --- | --- |
 | OCR text | The raw line EasyOCR extracted from the screenshot. |
-| Matched item | The closest Poe2Scout item name/type match. |
-| Price | `CurrentPrice` from Poe2Scout for the selected league. |
+| Matched item | The closest Poe2Scout item name/type match, with the returned `IconUrl` image when available. |
+| Price | `CurrentPrice` from Poe2Scout for the selected league, shown as exalted. |
 | Category | `CategoryApiId` from Poe2Scout. |
 | Confidence | RapidFuzz `WRatio` score, rounded in the UI. |
 
@@ -189,7 +189,7 @@ OCR text is normalized by:
 - Collapsing repeated whitespace
 - Ignoring short or obvious UI/stat lines such as `Requires`, `Quality`, `Stack Size`, and pure numbers
 
-Matches use RapidFuzz `fuzz.WRatio`. Results are sorted by confidence descending and capped at 50 rows.
+Matches use RapidFuzz `fuzz.WRatio`. Results are sorted by Poe2Scout `CurrentPrice` descending and capped at 50 rows. Confidence is only used as a tie-breaker for equal prices.
 
 Before fuzzy matching, rows beginning with `Skill:` or `Support:` are classified as `Trade only`. After fuzzy matching, matched skill/support gem categories are also converted to `Trade only` rows with no price. This prevents skill/support gem names from being matched against unrelated currency-exchange items or shown as currency-exchange prices.
 
@@ -220,6 +220,9 @@ Response shape:
   "league": "Runes of Aldur",
   "image_count": 1,
   "item_count": 1266,
+  "divine_exchange_rate_exalted": 85.61784382924093,
+  "divine_icon_url": "https://...",
+  "exalted_icon_url": "https://...",
   "ocr_lines": ["Chaos Orb"],
   "results": [
     {

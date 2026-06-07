@@ -26,6 +26,9 @@ class PriceResponse(BaseModel):
     league: str
     image_count: int
     item_count: int
+    divine_exchange_rate_exalted: float | None
+    divine_icon_url: str | None
+    exalted_icon_url: str | None
     ocr_lines: list[str]
     results: list[dict[str, Any]]
 
@@ -78,15 +81,64 @@ async def price_screenshot(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     results = match_ocr_lines(ocr_lines, items, min_score=min_score)
+    market_info = currency_market_info(items)
 
     return PriceResponse(
         realm=realm,
         league=league,
         image_count=len(image_payloads),
         item_count=len(items),
+        divine_exchange_rate_exalted=market_info["divine_exchange_rate_exalted"],
+        divine_icon_url=market_info["divine_icon_url"],
+        exalted_icon_url=market_info["exalted_icon_url"],
         ocr_lines=ocr_lines,
         results=results,
     )
+
+
+def currency_market_info(items: list[dict[str, Any]]) -> dict[str, Any]:
+    divine = currency_item(items, "divine", "Divine Orb")
+    exalted = currency_item(items, "exalted", "Exalted Orb")
+
+    return {
+        "divine_exchange_rate_exalted": _price_to_float(_field(divine, "current_price", "CurrentPrice"))
+        if divine
+        else None,
+        "divine_icon_url": _icon_url(divine),
+        "exalted_icon_url": _icon_url(exalted),
+    }
+
+
+def currency_item(items: list[dict[str, Any]], api_id: str, text: str) -> dict[str, Any] | None:
+    for item in items:
+        item_api_id = _field(item, "api_id", "ApiId")
+        item_text = _field(item, "text", "Text")
+        if item_api_id == api_id or item_text == text:
+            return item
+
+    return None
+
+
+def _icon_url(item: dict[str, Any] | None) -> str | None:
+    icon_url = _field(item, "icon_url", "IconUrl") if item is not None else None
+    return icon_url if isinstance(icon_url, str) and icon_url else None
+
+
+def _price_to_float(price: Any) -> float | None:
+    if price is None or price == "":
+        return None
+
+    try:
+        return float(price)
+    except (TypeError, ValueError):
+        return None
+
+
+def _field(item: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in item:
+            return item[key]
+    return None
 
 
 HTML = """
@@ -99,13 +151,16 @@ HTML = """
   <style>
     :root {
       color-scheme: dark;
-      --bg: #101217;
-      --panel: #191d24;
-      --panel-2: #202630;
-      --line: #323a46;
-      --text: #edf1f5;
-      --muted: #a8b0bc;
-      --accent: #d9b86f;
+      --bg: #0f1116;
+      --panel: #161a21;
+      --panel-2: #1d232c;
+      --panel-3: #12161d;
+      --line: #2b333f;
+      --line-strong: #46505e;
+      --text: #eef3f8;
+      --muted: #9ba5b3;
+      --accent: #d6b15f;
+      --accent-soft: #2b261a;
       --danger: #f28b82;
       --ok: #72d6a0;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -122,24 +177,24 @@ HTML = """
     }
 
     main {
-      width: min(1180px, calc(100vw - 32px));
+      width: min(1180px, calc(100vw - 40px));
       margin: 0 auto;
-      padding: 28px 0 40px;
+      padding: 30px 0 42px;
     }
 
     header {
       display: flex;
-      align-items: end;
+      align-items: center;
       justify-content: space-between;
       gap: 18px;
-      margin-bottom: 20px;
+      margin-bottom: 22px;
     }
 
     header > div { min-width: 0; }
 
     h1 {
       margin: 0;
-      font-size: 28px;
+      font-size: 30px;
       line-height: 1.1;
       letter-spacing: 0;
     }
@@ -151,10 +206,14 @@ HTML = """
 
     .controls {
       display: grid;
-      grid-template-columns: repeat(3, minmax(150px, 1fr)) auto auto;
+      grid-template-columns: minmax(140px, 1fr) minmax(260px, 1.35fr) minmax(130px, 1fr) auto auto;
       gap: 10px;
       align-items: end;
       margin-bottom: 14px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-3);
     }
 
     label {
@@ -163,59 +222,92 @@ HTML = """
       color: var(--muted);
       font-size: 12px;
       text-transform: uppercase;
+      letter-spacing: 0.04em;
     }
 
-    input[type="text"], input[type="number"] {
+    input[type="text"], input[type="number"], select {
       width: 100%;
-      height: 38px;
+      height: 40px;
       border: 1px solid var(--line);
       border-radius: 6px;
-      background: var(--panel);
+      background: #0f131a;
       color: var(--text);
-      padding: 0 10px;
+      padding: 0 11px;
       font-size: 14px;
     }
 
+    select {
+      cursor: pointer;
+    }
+
+    input[type="text"]:focus, input[type="number"]:focus, select:focus {
+      outline: 0;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px rgba(214, 177, 95, 0.18);
+    }
+
     button, .file-button {
-      height: 38px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      height: 40px;
       border: 1px solid var(--line);
       border-radius: 6px;
       background: var(--panel-2);
       color: var(--text);
-      padding: 0 14px;
+      padding: 0 16px;
       font-size: 14px;
       cursor: pointer;
       white-space: nowrap;
       text-align: center;
+      transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
     }
 
-    button:hover, .file-button:hover { border-color: var(--accent); }
+    button:hover, .file-button:hover {
+      border-color: var(--accent);
+      background: #252c36;
+    }
+
+    #priceButton:not(:disabled), .file-button {
+      border-color: #7c6a3f;
+      background: #191714;
+      color: #f4d997;
+    }
 
     button:disabled {
       cursor: not-allowed;
-      opacity: 0.55;
+      opacity: 0.48;
     }
 
     input[type="file"] { display: none; }
 
     .dropzone {
-      min-height: 220px;
-      border: 1px dashed var(--line);
+      min-height: 170px;
+      border: 1px dashed var(--line-strong);
       border-radius: 8px;
-      background: var(--panel);
+      background: #131720;
       display: grid;
       place-items: center;
-      padding: 18px;
+      padding: 20px;
       text-align: center;
       margin-bottom: 18px;
     }
 
-    .dropzone.is-dragover { border-color: var(--accent); background: #1e232b; }
+    .dropzone.is-dragover {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    #emptyState {
+      color: #dce4ed;
+      line-height: 1.45;
+    }
 
     .preview-grid {
       width: 100%;
       display: none;
-      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(140px, 180px));
+      justify-content: center;
       gap: 10px;
     }
 
@@ -224,13 +316,15 @@ HTML = """
       border-radius: 6px;
       background: #131820;
       overflow: hidden;
+      max-width: 180px;
     }
 
     .preview-tile img {
       width: 100%;
-      aspect-ratio: 16 / 10;
-      object-fit: cover;
+      height: 150px;
+      object-fit: contain;
       display: block;
+      background: #0d1015;
     }
 
     .preview-name {
@@ -243,17 +337,80 @@ HTML = """
     }
 
     .status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
       min-height: 24px;
       color: var(--muted);
-      margin-bottom: 14px;
+      margin: 2px 0 8px;
       font-size: 14px;
     }
 
     .status.error { color: var(--danger); }
 
+    .status-spinner {
+      width: 16px;
+      height: 16px;
+      border: 2px solid #3a4350;
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      display: none;
+      flex: 0 0 16px;
+      animation: spin 0.8s linear infinite;
+    }
+
+    .status.is-loading .status-spinner { display: inline-block; }
+
+    body.is-pricing .dropzone {
+      opacity: 0.75;
+      pointer-events: none;
+    }
+
+    .loading-row td {
+      color: var(--muted);
+    }
+
+    .loading-line {
+      color: var(--muted);
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .market-rate {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+      width: fit-content;
+      max-width: 100%;
+      min-height: 30px;
+      color: var(--muted);
+      margin: 0 0 16px;
+      padding: 4px 8px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel-3);
+      font-size: 13px;
+    }
+
+    .rate-icon {
+      width: 24px;
+      height: 24px;
+      object-fit: contain;
+      border-radius: 4px;
+      background: #11151b;
+    }
+
+    .rate-text {
+      color: var(--text);
+      min-width: 0;
+    }
+
     .layout {
       display: grid;
-      grid-template-columns: 1fr 320px;
+      grid-template-columns: minmax(0, 1fr) 320px;
       gap: 18px;
       align-items: start;
     }
@@ -262,18 +419,19 @@ HTML = """
       width: 100%;
       border-collapse: collapse;
       overflow: hidden;
-      border: 1px solid var(--line);
       border-radius: 8px;
       background: var(--panel);
     }
 
     .table-wrap {
       overflow-x: auto;
+      border: 1px solid var(--line);
       border-radius: 8px;
+      background: var(--panel);
     }
 
     th, td {
-      padding: 10px;
+      padding: 11px 12px;
       border-bottom: 1px solid var(--line);
       text-align: left;
       vertical-align: top;
@@ -285,12 +443,41 @@ HTML = """
       color: var(--muted);
       font-size: 12px;
       text-transform: uppercase;
-      background: #161a20;
+      letter-spacing: 0.04em;
+      background: #12161d;
+    }
+
+    tbody tr {
+      background: var(--panel);
+    }
+
+    tbody tr:nth-child(even) {
+      background: #141922;
     }
 
     tr:last-child td { border-bottom: 0; }
 
     .needs-review td { color: #ffd8a8; }
+
+    .match-cell {
+      display: flex;
+      align-items: flex-start;
+      gap: 9px;
+      min-width: 0;
+    }
+
+    .item-icon {
+      width: 32px;
+      height: 32px;
+      flex: 0 0 32px;
+      object-fit: contain;
+      border-radius: 4px;
+      background: #11151b;
+    }
+
+    .match-text {
+      min-width: 0;
+    }
 
     .confidence {
       display: inline-flex;
@@ -321,7 +508,7 @@ HTML = """
       border: 1px solid var(--line);
       border-radius: 8px;
       background: var(--panel);
-      padding: 14px;
+      padding: 16px;
       min-width: 0;
     }
 
@@ -348,7 +535,9 @@ HTML = """
     @media (max-width: 860px) {
       main { width: min(100vw - 20px, 1180px); padding-top: 18px; }
       header, .layout { display: grid; grid-template-columns: 1fr; }
-      .controls { grid-template-columns: 1fr; }
+      header { align-items: start; gap: 12px; }
+      .controls { grid-template-columns: 1fr; padding: 12px; }
+      .controls button { width: 100%; }
       .file-button { width: 100%; }
       table { min-width: 720px; }
       .lines { max-height: 260px; }
@@ -358,8 +547,12 @@ HTML = """
       main { width: calc(100vw - 14px); padding: 12px 0 24px; }
       h1 { font-size: 22px; }
       .muted { font-size: 13px; }
-      .dropzone { min-height: 170px; padding: 12px; }
-      .preview-grid { grid-template-columns: 1fr; }
+      .controls { gap: 9px; padding: 10px; }
+      .dropzone { min-height: 145px; padding: 12px; }
+      .preview-grid { grid-template-columns: minmax(0, 180px); }
+      .market-rate { width: 100%; }
+      .rate-icon { width: 22px; height: 22px; }
+      .rate-text { flex: 1 1 180px; }
       th, td { padding: 8px; font-size: 13px; }
       aside { padding: 10px; }
     }
@@ -378,13 +571,25 @@ HTML = """
 
     <section class="controls">
       <label>Realm
-        <input id="realmInput" type="text" value="poe2">
+        <select id="realmInput">
+          <option value="poe2" selected>poe2</option>
+        </select>
       </label>
       <label>League
-        <input id="leagueInput" type="text" value="Runes of Aldur">
+        <select id="leagueInput">
+          <option value="Runes of Aldur" selected>Runes of Aldur</option>
+        </select>
       </label>
       <label>Review below
-        <input id="scoreInput" type="number" min="1" max="100" value="80">
+        <select id="scoreInput">
+          <option value="70">70</option>
+          <option value="75">75</option>
+          <option value="80" selected>80</option>
+          <option value="85">85</option>
+          <option value="90">90</option>
+          <option value="95">95</option>
+          <option value="100">100</option>
+        </select>
       </label>
       <button id="priceButton" disabled>Price</button>
       <button id="clearButton" disabled>Clear</button>
@@ -398,7 +603,11 @@ HTML = """
       <div id="previewGrid" class="preview-grid" aria-label="Selected screenshot previews"></div>
     </section>
 
-    <div id="status" class="status"></div>
+    <div id="status" class="status" role="status" aria-live="polite">
+      <span class="status-spinner" aria-hidden="true"></span>
+      <span id="statusText"></span>
+    </div>
+    <div id="marketRate" class="market-rate">Poe2Scout prices are shown in exalted. Divine rate appears after pricing.</div>
 
     <section class="layout">
       <div class="table-wrap">
@@ -407,7 +616,7 @@ HTML = """
             <tr>
               <th>OCR text</th>
               <th>Matched item</th>
-              <th>Price</th>
+              <th>Price (exalted)</th>
               <th>Category</th>
               <th>Confidence</th>
             </tr>
@@ -431,27 +640,52 @@ HTML = """
     const dropzone = document.querySelector("#dropzone");
     const previewGrid = document.querySelector("#previewGrid");
     const emptyState = document.querySelector("#emptyState");
+    const realmInput = document.querySelector("#realmInput");
+    const leagueInput = document.querySelector("#leagueInput");
+    const scoreInput = document.querySelector("#scoreInput");
     const priceButton = document.querySelector("#priceButton");
     const clearButton = document.querySelector("#clearButton");
     const statusNode = document.querySelector("#status");
+    const statusText = document.querySelector("#statusText");
+    const marketRate = document.querySelector("#marketRate");
     const resultBody = document.querySelector("#resultBody");
     const ocrLines = document.querySelector("#ocrLines");
     const maxImages = 4;
     let currentFiles = [];
     let previewUrls = [];
+    let isPricing = false;
 
-    function setStatus(message, isError = false) {
-      statusNode.textContent = message;
+    function setStatus(message, isError = false, isLoading = false) {
+      statusText.textContent = message;
       statusNode.classList.toggle("error", isError);
+      statusNode.classList.toggle("is-loading", isLoading);
     }
 
     function updateButtons() {
       const hasFiles = currentFiles.length > 0;
-      priceButton.disabled = !hasFiles;
-      clearButton.disabled = !hasFiles;
+      priceButton.disabled = isPricing || !hasFiles;
+      clearButton.disabled = isPricing || !hasFiles;
+      fileInput.disabled = isPricing;
+      realmInput.disabled = isPricing;
+      leagueInput.disabled = isPricing;
+      scoreInput.disabled = isPricing;
+    }
+
+    function setPricingState(active) {
+      isPricing = active;
+      document.body.classList.toggle("is-pricing", active);
+      priceButton.textContent = active ? "Pricing..." : "Price";
+      updateButtons();
+
+      if (active) {
+        resultBody.innerHTML = `<tr class="loading-row"><td colspan="5">Pricing current screenshots...</td></tr>`;
+        ocrLines.innerHTML = `<div class="loading-line">OCR is reading the image text...</div>`;
+      }
     }
 
     function addFiles(files) {
+      if (isPricing) return;
+
       const images = Array.from(files || []).filter((file) => file.type.startsWith("image/"));
       if (!images.length) return;
 
@@ -531,6 +765,7 @@ HTML = """
       emptyState.style.display = "block";
       resultBody.innerHTML = `<tr><td colspan="5" class="muted">No screenshot priced yet.</td></tr>`;
       ocrLines.innerHTML = `<div class="muted">Extracted text appears here.</div>`;
+      renderMarketRate();
       setStatus("");
       updateButtons();
     }
@@ -539,8 +774,45 @@ HTML = """
 
     function formatPrice(price) {
       if (price === null || price === undefined || price === "") return "n/a";
-      if (typeof price === "number") return Number.isInteger(price) ? `${price}` : price.toFixed(2);
-      return `${price}`;
+      const amount = typeof price === "number" ? formatNumber(price) : `${price}`;
+      return `${amount} exalted`;
+    }
+
+    function formatNumber(value) {
+      if (!Number.isFinite(value)) return `${value}`;
+      if (Number.isInteger(value)) return `${value}`;
+      return value.toFixed(2);
+    }
+
+    function formatRateText(rate) {
+      if (rate === null || rate === undefined || rate === "") return "Divine rate unavailable from Poe2Scout.";
+      const value = typeof rate === "number" ? rate : Number(rate);
+      if (!Number.isFinite(value)) return "Divine rate unavailable from Poe2Scout.";
+      return `1 Divine Orb = ${formatNumber(value)} exalted`;
+    }
+
+    function rateIcon(url, label) {
+      if (!url) return "";
+      return `<img class="rate-icon" src="${escapeHtml(url)}" alt="${escapeHtml(label)}" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display='none'">`;
+    }
+
+    function renderMarketRate(payload = null) {
+      if (!payload) {
+        marketRate.textContent = "Poe2Scout prices are shown in exalted. Divine rate appears after pricing.";
+        return;
+      }
+
+      marketRate.innerHTML = `
+        ${rateIcon(payload.divine_icon_url, "Divine Orb")}
+        <span class="rate-text">Poe2Scout divine rate: ${escapeHtml(formatRateText(payload.divine_exchange_rate_exalted))}</span>
+        ${rateIcon(payload.exalted_icon_url, "Exalted Orb")}
+      `;
+    }
+
+    function itemIcon(row) {
+      if (!row.icon_url) return "";
+      const url = escapeHtml(row.icon_url);
+      return `<img class="item-icon" src="${url}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display='none'">`;
     }
 
     function escapeHtml(value) {
@@ -562,7 +834,12 @@ HTML = """
       resultBody.innerHTML = results.map((row) => `
         <tr class="${row.source === "trade_only" ? "trade-only" : row.needs_review ? "needs-review" : ""}">
           <td>${escapeHtml(row.ocr_text)}</td>
-          <td>${escapeHtml(row.matched)}${row.message ? `<span class="note">${escapeHtml(row.message)}</span>` : ""}</td>
+          <td>
+            <div class="match-cell">
+              ${itemIcon(row)}
+              <div class="match-text">${escapeHtml(row.matched)}${row.message ? `<span class="note">${escapeHtml(row.message)}</span>` : ""}</div>
+            </div>
+          </td>
           <td>${escapeHtml(formatPrice(row.price))}</td>
           <td>${escapeHtml(row.category)}</td>
           <td>${row.source === "trade_only" ? "Trade" : `<span class="confidence">${Math.round(row.confidence)}</span>`}</td>
@@ -578,6 +855,11 @@ HTML = """
       ocrLines.innerHTML = lines.map((line) => `<div class="line">${escapeHtml(line)}</div>`).join("");
     }
 
+    function renderRequestError() {
+      resultBody.innerHTML = `<tr><td colspan="5" class="muted">Pricing failed. Check the status message and try again.</td></tr>`;
+      ocrLines.innerHTML = `<div class="muted">OCR lines were not updated.</div>`;
+    }
+
     async function priceCurrentBatch() {
       if (!currentFiles.length || priceButton.disabled) return;
 
@@ -585,13 +867,12 @@ HTML = """
       currentFiles.forEach((file, index) => {
         formData.append("image", file, file.name || `clipboard-${index + 1}.png`);
       });
-      formData.append("realm", document.querySelector("#realmInput").value.trim() || "poe2");
-      formData.append("league", document.querySelector("#leagueInput").value.trim() || "Runes of Aldur");
-      formData.append("min_score", document.querySelector("#scoreInput").value || "80");
+      formData.append("realm", realmInput.value.trim() || "poe2");
+      formData.append("league", leagueInput.value.trim() || "Runes of Aldur");
+      formData.append("min_score", scoreInput.value || "80");
 
-      setStatus(`Running OCR on ${currentFiles.length} image${currentFiles.length === 1 ? "" : "s"} and fetching Poe2Scout prices...`);
-      priceButton.disabled = true;
-      clearButton.disabled = true;
+      setPricingState(true);
+      setStatus(`Running OCR on ${currentFiles.length} image${currentFiles.length === 1 ? "" : "s"} and fetching Poe2Scout prices...`, false, true);
 
       try {
         const response = await fetch("/api/price", { method: "POST", body: formData });
@@ -600,11 +881,13 @@ HTML = """
 
         renderResults(payload.results);
         renderLines(payload.ocr_lines);
+        renderMarketRate(payload);
         setStatus(`Matched ${payload.results.length} rows from ${payload.image_count} image${payload.image_count === 1 ? "" : "s"} against ${payload.item_count} ${payload.league} items.`);
       } catch (error) {
+        renderRequestError();
         setStatus(error.message, true);
       } finally {
-        updateButtons();
+        setPricingState(false);
       }
     }
 

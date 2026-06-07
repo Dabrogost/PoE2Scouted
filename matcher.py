@@ -8,9 +8,12 @@ from rapidfuzz import fuzz, process
 
 NOISE_PATTERNS = (
     re.compile(r"^\d+(\.\d+)?$"),
+    re.compile(r"^[il1]\s*x$", re.I),
+    re.compile(r"^[kr][a-z]{2,8}shape\s+c[a-z]{5,12}i[a-z]{2,4}s?$", re.I),
     re.compile(r"^(level|requires|quality|armour|armor|evasion|energy shield|stack size)\b", re.I),
     re.compile(r"^(shift|ctrl|alt|right click|left click)\b", re.I),
 )
+STACK_COUNT_PATTERN = re.compile(r"^\s*(?:\d+|[il])\s*x\s+", re.I)
 TRADE_ONLY_PATTERN = re.compile(r"^\s*(skill|support)\s*:\s*(?P<name>.+)$", re.I)
 TRADE_ONLY_CATEGORIES = {
     "lineagesupportgems",
@@ -59,20 +62,25 @@ def match_ocr_lines(
     if not choices:
         return []
 
-    results: list[dict[str, Any]] = []
-    seen_matches: set[tuple[str, str]] = set()
+    choice_positions = {choice: position for position, choice in enumerate(choices)}
+    results_by_key: dict[str, dict[str, Any]] = {}
+    suffixes = _detected_item_suffixes(ocr_lines, choices)
 
     for raw in _candidate_ocr_lines(ocr_lines):
         trade_only = _trade_only_result(raw)
         if trade_only is not None:
-            results.append(trade_only)
+            _store_result(results_by_key, trade_only)
             continue
 
         cleaned = normalize_text(raw)
         if len(cleaned) < 3:
             continue
+        if not _meaningful_tokens(cleaned):
+            continue
+        if cleaned in suffixes:
+            continue
 
-        match = process.extractOne(cleaned, choices, scorer=fuzz.WRatio)
+        match = _best_match(cleaned, choices, choice_positions, suffixes)
         if not match:
             continue
 
@@ -80,21 +88,14 @@ def match_ocr_lines(
         item = index[matched_name]
         category = _field(item, "category_api_id", "CategoryApiId")
         if _is_trade_only_category(category):
-            results.append(_matched_trade_only_result(raw, item, matched_name, score))
+            _store_result(results_by_key, _matched_trade_only_result(raw, item, matched_name, score))
             continue
 
         alignment_ok = _has_meaningful_alignment(cleaned, matched_name, score)
-        dedupe_key = (
-            cleaned,
-            str(_field(item, "item_id", "ItemId") or _field(item, "api_id", "ApiId") or matched_name),
-        )
-        if dedupe_key in seen_matches:
-            continue
-
-        seen_matches.add(dedupe_key)
-        results.append(
+        _store_result(
+            results_by_key,
             {
-                "ocr_text": raw,
+                "ocr_text": _display_ocr_text(raw),
                 "matched": _field(item, "text", "Text")
                 or _field(item, "name", "Name")
                 or _field(item, "type", "Type")
@@ -112,20 +113,67 @@ def match_ocr_lines(
             }
         )
 
-    return sorted(results, key=_sort_key, reverse=True)[:limit]
+    return sorted(results_by_key.values(), key=_sort_key, reverse=True)[:limit]
 
 
-def _sort_key(row: dict[str, Any]) -> tuple[int, float]:
-    return (0 if row.get("source") == "trade_only" else 1, float(row.get("confidence") or 0))
+def _sort_key(row: dict[str, Any]) -> tuple[int, int, float, float]:
+    price = _price_to_float(row.get("price"))
+    return (
+        0 if row.get("source") == "trade_only" else 1,
+        0 if price is None else 1,
+        price if price is not None else float("-inf"),
+        float(row.get("confidence") or 0),
+    )
+
+
+def _store_result(results_by_key: dict[str, dict[str, Any]], row: dict[str, Any]) -> None:
+    key = _result_key(row)
+    existing = results_by_key.get(key)
+    if existing is None or _row_quality(row) > _row_quality(existing):
+        results_by_key[key] = row
+
+
+def _result_key(row: dict[str, Any]) -> str:
+    if row.get("source") == "poe2scout":
+        item_key = row.get("item_id") or row.get("api_id") or row.get("matched_key") or row.get("matched")
+        return f"item:{item_key}"
+
+    return f"{row.get('source')}:{row.get('matched_key') or normalize_text(str(row.get('ocr_text') or ''))}"
+
+
+def _row_quality(row: dict[str, Any]) -> tuple[int, float, int]:
+    return (
+        1 if row.get("alignment_ok") else 0,
+        float(row.get("confidence") or 0),
+        len(normalize_text(str(row.get("ocr_text") or ""))),
+    )
+
+
+def _price_to_float(price: Any) -> float | None:
+    if price is None or price == "":
+        return None
+
+    try:
+        return float(price)
+    except (TypeError, ValueError):
+        return None
 
 
 def normalize_text(value: str) -> str:
     value = value.casefold()
+    value = STACK_COUNT_PATTERN.sub("", value)
+    value = re.sub(r"['\u2019]\s*s\b", "s", value)
     value = value.replace("'", "")
+    value = value.replace("\u2019", "")
     value = re.sub(r"^\s*(skill|support)\s*:\s*", "", value)
     value = re.sub(r"[^a-z0-9+% -]+", " ", value)
     value = re.sub(r"\s+", " ", value).strip()
     return value
+
+
+def _display_ocr_text(value: str) -> str:
+    value = STACK_COUNT_PATTERN.sub("", value).strip()
+    return re.sub(r"['\u2019]\s+s\b", "'s", value)
 
 
 def _has_meaningful_alignment(query: str, matched_name: str, score: float) -> bool:
@@ -150,6 +198,43 @@ def _meaningful_tokens(value: str) -> list[str]:
     return [token for token in normalize_text(value).split() if token not in GENERIC_TOKENS and len(token) > 1]
 
 
+def _detected_item_suffixes(ocr_lines: list[str], choices: list[str]) -> set[str]:
+    suffixes: set[str] = set()
+    normalized_lines = {normalize_text(line) for line in ocr_lines}
+
+    for line in normalized_lines:
+        tokens = line.split()
+        if not tokens or len(tokens) > 2:
+            continue
+
+        matching_choices = sum(1 for choice in choices if choice.endswith(f" {line}"))
+        if matching_choices >= 3:
+            suffixes.add(line)
+
+    return suffixes
+
+
+def _best_match(
+    cleaned: str,
+    choices: list[str],
+    choice_positions: dict[str, int],
+    suffixes: set[str],
+) -> tuple[str, float, int] | None:
+    for suffix in suffixes:
+        if suffix in cleaned.split():
+            continue
+
+        completed = f"{cleaned} {suffix}"
+        if completed in choice_positions:
+            return (completed, 100.0, choice_positions[completed])
+
+        contextual_match = process.extractOne(completed, choices, scorer=fuzz.WRatio)
+        if contextual_match and _has_meaningful_alignment(completed, contextual_match[0], contextual_match[1]):
+            return contextual_match
+
+    return process.extractOne(cleaned, choices, scorer=fuzz.WRatio)
+
+
 def _trade_only_result(raw: str) -> dict[str, Any] | None:
     match = TRADE_ONLY_PATTERN.match(raw)
     if not match:
@@ -158,7 +243,7 @@ def _trade_only_result(raw: str) -> dict[str, Any] | None:
     kind = match.group(1).title()
     item_name = match.group("name").strip()
     return {
-        "ocr_text": raw,
+        "ocr_text": _display_ocr_text(raw),
         "matched": f"{kind}: {item_name}",
         "matched_key": normalize_text(item_name),
         "item_id": None,
@@ -182,7 +267,7 @@ def _matched_trade_only_result(
 ) -> dict[str, Any]:
     matched = _field(item, "text", "Text") or _field(item, "name", "Name") or matched_name
     return {
-        "ocr_text": raw,
+        "ocr_text": _display_ocr_text(raw),
         "matched": matched,
         "matched_key": matched_name,
         "item_id": _field(item, "item_id", "ItemId"),
@@ -230,6 +315,7 @@ def _field(item: dict[str, Any], *keys: str) -> Any:
 
 def _candidate_ocr_lines(lines: list[str]) -> list[str]:
     candidates: list[str] = []
+    cleaned_lines: list[str] = []
 
     for line in lines:
         cleaned = line.strip()
@@ -238,9 +324,17 @@ def _candidate_ocr_lines(lines: list[str]) -> list[str]:
         if any(pattern.search(cleaned) for pattern in NOISE_PATTERNS):
             continue
 
+        cleaned_lines.append(cleaned)
         candidates.append(cleaned)
 
         parts = [part.strip() for part in re.split(r"\s{2,}|[|]+", cleaned) if part.strip()]
         candidates.extend(part for part in parts if part != cleaned)
+
+    for index, line in enumerate(cleaned_lines[:-1]):
+        normalized = normalize_text(line)
+        next_line = cleaned_lines[index + 1]
+        next_normalized = normalize_text(next_line)
+        if normalized.endswith("rune of") and 0 < len(next_normalized.split()) <= 2:
+            candidates.append(f"{line} {next_line}")
 
     return candidates
