@@ -33,6 +33,7 @@ This is a screenshot item-name matcher, not a full rare-item valuation engine.
 | Web server | `http://127.0.0.1:8000` | run command |
 | Poe2Scout cache time | 15 minutes | `poe2scout.py` |
 | Poe2Scout user agent | `poe2-screenshot-pricer/0.1 contact:dabrogost@gmail.com` | `poe2scout.py` |
+| Bundled OCR item snapshot | `data/poe2scout_items_snapshot.json` | `poe2scout.py` |
 
 Important realm detail: Poe2Scout's API accepts `poe2` for this app's current league data. The more obvious `pc` value returned `400 Invalid league name` in live testing.
 
@@ -56,9 +57,10 @@ It does not inspect rare item affixes, calculate DPS, evaluate rolls, or query t
 | File | Purpose |
 | --- | --- |
 | `app.py` | FastAPI app, HTML page, upload endpoint, request validation, and response shape. |
-| `poe2scout.py` | Poe2Scout API client, request headers, JSON cache, and stale-cache fallback. |
-| `ocr.py` | EasyOCR setup, model cache location, image conversion, and OCR line cleanup. |
-| `matcher.py` | Text normalization, item-name indexing, fuzzy matching, deduping, and confidence flags. |
+| `poe2scout.py` | Poe2Scout API client, request headers, JSON cache, snapshot loading, and fallback behavior. |
+| `ocr.py` | EasyOCR setup, model cache location, image conversion, bounding-box grouping, and OCR line cleanup. |
+| `matcher.py` | Text normalization, item lexicon construction, OCR spell correction, fuzzy matching, deduping, and confidence flags. |
+| `data/poe2scout_items_snapshot.json` | Bundled Poe2Scout item snapshot used as an OCR recognition lexicon and final price fallback when live/cache data is unavailable. |
 | `requirements.txt` | Python dependencies needed to run the local app. |
 | `.gitignore` | Excludes `.venv`, `.cache`, bytecode, and logs. |
 
@@ -163,15 +165,20 @@ The app writes cache files inside the project folder:
 | Cache | Path | Notes |
 | --- | --- | --- |
 | Poe2Scout item list | `.cache/poe2scout` | Fresh for 15 minutes. |
+| Bundled item snapshot | `data/poe2scout_items_snapshot.json` | Committed fallback item list for Hugging Face cold starts and OCR lexicon stability. |
 | EasyOCR models | `.cache/easyocr` | Downloaded by EasyOCR on first OCR use. |
 
-If the Poe2Scout request fails and a stale item-list cache exists, `poe2scout.py` returns the stale cache instead of failing. This includes network errors and non-2xx HTTP responses. Invalid JSON still fails because that means the response shape itself was not usable.
+For pricing, the app reuses a fresh Poe2Scout cache for 15 minutes. When the cache is stale or missing, it requests live Poe2Scout data. If that request fails, it falls back to stale cache, then the bundled snapshot. The UI status line reports whether prices came from `live`, `cache`, `stale_cache`, or `snapshot` data.
+
+For OCR reliability, the matcher uses the bundled snapshot as a stable local item-name lexicon even when live prices are available. Live/cache items are still preferred for prices when the same item exists in both sources. If an item is recognized only from the bundled snapshot while live/cache pricing is otherwise available, it is shown for review with no price instead of pretending the snapshot price is current.
 
 To force a fresh Poe2Scout item list, delete the matching file under `.cache/poe2scout` or wait 15 minutes.
 
 ## Matching Behavior
 
-The matcher builds a local index from each Poe2Scout item's:
+The matcher builds a local item lexicon from the live/cache Poe2Scout item list plus the bundled snapshot. Live/cache items win for duplicate names so prices stay current, while the snapshot keeps OCR correction available across Hugging Face container restarts.
+
+The local index uses each item's:
 
 - `Text`
 - `Name`
@@ -184,9 +191,13 @@ The same logic also handles lowercase snake_case versions of those fields.
 OCR text is normalized by:
 
 - Lowercasing with `casefold`
+- Normalizing common quantity OCR such as `Ix`, `IX`, and `lX` to `1x`
 - Removing apostrophes
 - Replacing unsupported punctuation with spaces
 - Collapsing repeated whitespace
+- Correcting close OCR tokens against known item vocabulary, such as `Culrnination` to `Culmination` or `GlaciaI` to `Glacial`
+- Splitting over-merged OCR text back into known item names when possible
+- Joining nearby fragments when they form a known item name
 - Ignoring short or obvious UI/stat lines such as `Requires`, `Quality`, `Stack Size`, and pure numbers
 
 Matches use RapidFuzz `fuzz.WRatio`. Results are sorted by Poe2Scout `CurrentPrice` descending and capped at 50 rows. Confidence is only used as a tie-breaker for equal prices.
@@ -223,6 +234,9 @@ Response shape:
   "divine_exchange_rate_exalted": 85.61784382924093,
   "divine_icon_url": "https://...",
   "exalted_icon_url": "https://...",
+  "price_data_source": "live",
+  "price_data_age_seconds": 0.0,
+  "lexicon_item_count": 1266,
   "ocr_lines": ["Chaos Orb"],
   "results": [
     {
@@ -233,6 +247,8 @@ Response shape:
       "api_id": "chaos",
       "category": "currency",
       "price": 5.6613546739552145,
+      "unit_price": 5.6613546739552145,
+      "quantity": 1,
       "icon_url": "https://...",
       "alignment_ok": true,
       "confidence": 100.0,

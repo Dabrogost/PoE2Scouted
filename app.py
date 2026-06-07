@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import re
 from typing import Annotated, Any
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -10,7 +11,7 @@ from pydantic import BaseModel
 
 from matcher import match_ocr_lines
 from ocr import OCREngineError, extract_text_lines
-from poe2scout import Poe2ScoutError, fetch_items
+from poe2scout import Poe2ScoutError, fetch_item_data, load_item_snapshot
 
 
 DEFAULT_REALM = "poe2"
@@ -18,7 +19,7 @@ DEFAULT_LEAGUE = "Runes of Aldur"
 DEFAULT_MIN_SCORE = 80
 MAX_IMAGES = 4
 
-app = FastAPI(title="PoE2 Screenshot Pricer")
+app = FastAPI(title="PoE 2 Screenshot Price Checker")
 
 
 class PriceResponse(BaseModel):
@@ -29,6 +30,9 @@ class PriceResponse(BaseModel):
     divine_exchange_rate_exalted: float | None
     divine_icon_url: str | None
     exalted_icon_url: str | None
+    price_data_source: str
+    price_data_age_seconds: float | None
+    lexicon_item_count: int
     ocr_lines: list[str]
     results: list[dict[str, Any]]
 
@@ -74,13 +78,15 @@ async def price_screenshot(
         ocr_lines: list[str] = []
         for image_bytes in image_payloads:
             ocr_lines.extend(extract_text_lines(image_bytes))
-        items = fetch_items(realm=realm, league=league)
+        item_data = fetch_item_data(realm=realm, league=league)
+        items = item_data.items
+        snapshot_items = load_item_snapshot(realm=realm, league=league)
     except OCREngineError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Poe2ScoutError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    results = match_ocr_lines(ocr_lines, items, min_score=min_score)
+    results = match_ocr_lines(ocr_lines, items, lexicon_items=snapshot_items, min_score=min_score)
     market_info = currency_market_info(items)
 
     return PriceResponse(
@@ -91,6 +97,9 @@ async def price_screenshot(
         divine_exchange_rate_exalted=market_info["divine_exchange_rate_exalted"],
         divine_icon_url=market_info["divine_icon_url"],
         exalted_icon_url=market_info["exalted_icon_url"],
+        price_data_source=item_data.source,
+        price_data_age_seconds=item_data.age_seconds,
+        lexicon_item_count=len(snapshot_items) if snapshot_items else len(items),
         ocr_lines=ocr_lines,
         results=results,
     )
@@ -121,7 +130,10 @@ def currency_item(items: list[dict[str, Any]], api_id: str, text: str) -> dict[s
 
 def _icon_url(item: dict[str, Any] | None) -> str | None:
     icon_url = _field(item, "icon_url", "IconUrl") if item is not None else None
-    return icon_url if isinstance(icon_url, str) and icon_url else None
+    if not isinstance(icon_url, str) or not icon_url:
+        return None
+
+    return re.sub(r"^(https?://[^/]+)/+", r"\1/", icon_url)
 
 
 def _price_to_float(price: Any) -> float | None:
@@ -147,7 +159,7 @@ HTML = """
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>PoE2 Screenshot Pricer</title>
+  <title>PoE 2 Screenshot Price Checker</title>
   <style>
     :root {
       color-scheme: dark;
@@ -496,6 +508,8 @@ HTML = """
 
     .trade-only td { color: #c9d7ff; }
 
+    .unmatched td { color: #ffd8a8; }
+
     .note {
       display: block;
       margin-top: 4px;
@@ -562,7 +576,7 @@ HTML = """
   <main>
     <header>
       <div>
-        <h1>PoE2 Screenshot Pricer</h1>
+        <h1>PoE 2 Screenshot Price Checker</h1>
         <div class="muted">Paste or upload a screenshot, then match OCR text against Poe2Scout prices.</div>
       </div>
       <label class="file-button" for="fileInput">Upload</label>
@@ -778,6 +792,11 @@ HTML = """
       return `${amount} exalted`;
     }
 
+    function priceNote(row) {
+      if (!row || !row.quantity || row.quantity <= 1 || row.unit_price === null || row.unit_price === undefined) return "";
+      return `<span class="note">${escapeHtml(row.quantity)} x ${escapeHtml(formatPrice(row.unit_price))}</span>`;
+    }
+
     function formatNumber(value) {
       if (!Number.isFinite(value)) return `${value}`;
       if (Number.isInteger(value)) return `${value}`;
@@ -789,6 +808,23 @@ HTML = """
       const value = typeof rate === "number" ? rate : Number(rate);
       if (!Number.isFinite(value)) return "Divine rate unavailable from Poe2Scout.";
       return `1 Divine Orb = ${formatNumber(value)} exalted`;
+    }
+
+    function formatAge(seconds) {
+      const value = Number(seconds);
+      if (!Number.isFinite(value)) return "";
+      if (value < 60) return `${Math.round(value)}s old`;
+      if (value < 3600) return `${Math.round(value / 60)}m old`;
+      return `${Math.round(value / 3600)}h old`;
+    }
+
+    function priceSourceLabel(payload) {
+      const age = formatAge(payload.price_data_age_seconds);
+      if (payload.price_data_source === "live") return "live Poe2Scout prices";
+      if (payload.price_data_source === "cache") return `cached Poe2Scout prices${age ? `, ${age}` : ""}`;
+      if (payload.price_data_source === "stale_cache") return `stale cached prices${age ? `, ${age}` : ""}`;
+      if (payload.price_data_source === "snapshot") return "bundled snapshot fallback";
+      return "Poe2Scout prices";
     }
 
     function rateIcon(url, label) {
@@ -827,12 +863,12 @@ HTML = """
 
     function renderResults(results) {
       if (!results.length) {
-        resultBody.innerHTML = `<tr><td colspan="5" class="muted">No likely Poe2Scout item names found.</td></tr>`;
+        resultBody.innerHTML = `<tr><td colspan="5" class="muted">No OCR rows found.</td></tr>`;
         return;
       }
 
       resultBody.innerHTML = results.map((row) => `
-        <tr class="${row.source === "trade_only" ? "trade-only" : row.needs_review ? "needs-review" : ""}">
+        <tr class="${row.source === "unmatched" ? "unmatched" : row.source === "trade_only" ? "trade-only" : row.needs_review ? "needs-review" : ""}">
           <td>${escapeHtml(row.ocr_text)}</td>
           <td>
             <div class="match-cell">
@@ -840,9 +876,9 @@ HTML = """
               <div class="match-text">${escapeHtml(row.matched)}${row.message ? `<span class="note">${escapeHtml(row.message)}</span>` : ""}</div>
             </div>
           </td>
-          <td>${escapeHtml(formatPrice(row.price))}</td>
+          <td>${escapeHtml(formatPrice(row.price))}${priceNote(row)}</td>
           <td>${escapeHtml(row.category)}</td>
-          <td>${row.source === "trade_only" ? "Trade" : `<span class="confidence">${Math.round(row.confidence)}</span>`}</td>
+          <td>${row.source === "trade_only" ? "Trade" : row.source === "unmatched" ? "Review" : `<span class="confidence">${Math.round(row.confidence)}</span>`}</td>
         </tr>
       `).join("");
     }
@@ -882,7 +918,9 @@ HTML = """
         renderResults(payload.results);
         renderLines(payload.ocr_lines);
         renderMarketRate(payload);
-        setStatus(`Matched ${payload.results.length} rows from ${payload.image_count} image${payload.image_count === 1 ? "" : "s"} against ${payload.item_count} ${payload.league} items.`);
+        const pricedRows = payload.results.filter((row) => row.source === "poe2scout" && row.price !== null && row.price !== undefined).length;
+        const reviewRows = payload.results.filter((row) => row.needs_review).length;
+        setStatus(`Priced ${pricedRows} row${pricedRows === 1 ? "" : "s"} from ${payload.image_count} image${payload.image_count === 1 ? "" : "s"} against ${payload.item_count} ${payload.league} items using ${priceSourceLabel(payload)}; OCR lexicon has ${payload.lexicon_item_count} items${reviewRows ? `; ${reviewRows} row${reviewRows === 1 ? "" : "s"} need review.` : "."}`);
       } catch (error) {
         renderRequestError();
         setStatus(error.message, true);
