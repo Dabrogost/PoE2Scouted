@@ -16,12 +16,6 @@ NOISE_PATTERNS = (
 )
 STACK_COUNT_PATTERN = re.compile(r"^\s*(?:\d+|[il])\s*x\s+", re.I)
 STACK_COUNT_CAPTURE_PATTERN = re.compile(r"^\s*(?P<count>\d+|[il])\s*x\s+", re.I)
-TRADE_ONLY_PATTERN = re.compile(r"^\s*(skill|support)\s*:\s*(?P<name>.+)$", re.I)
-TRADE_ONLY_CATEGORIES = {
-    "lineagesupportgems",
-    "skillgems",
-    "supportgems",
-}
 GENERIC_TOKENS = {
     "a",
     "an",
@@ -192,10 +186,6 @@ def _match_candidate(
     min_score: int,
 ) -> dict[str, Any] | None:
     raw = candidate.text
-    trade_only = _trade_only_result(raw)
-    if trade_only is not None:
-        return trade_only
-
     cleaned = normalize_text(raw)
     corrected = _correct_normalized_text(cleaned, lexicon)
     if len(corrected) < 3:
@@ -216,9 +206,6 @@ def _match_candidate(
     matched_name, score, _ = match
     item = index[matched_name]
     category = _field(item, "category_api_id", "CategoryApiId")
-    if _is_trade_only_category(category):
-        return _matched_trade_only_result(raw, item, matched_name, score)
-
     alignment_ok = _has_meaningful_alignment(corrected, matched_name, score)
     quantity = _quantity(raw)
     lexicon_only = bool(item.get("_lexicon_only"))
@@ -246,11 +233,7 @@ def _match_candidate(
 
 def _sort_key(row: dict[str, Any]) -> tuple[int, int, float, float]:
     price = _price_to_float(row.get("price"))
-    source_rank = 2
-    if row.get("source") == "unmatched":
-        source_rank = 0
-    elif row.get("source") == "trade_only":
-        source_rank = 1
+    source_rank = 0 if row.get("source") == "unmatched" else 1
 
     return (
         source_rank,
@@ -517,62 +500,6 @@ def _extract_choice_match(
 
     matched_name, score, _ = match
     return (matched_name, score, lexicon.choice_positions.get(matched_name, 0))
-
-
-def _trade_only_result(raw: str) -> dict[str, Any] | None:
-    match = TRADE_ONLY_PATTERN.match(raw)
-    if not match:
-        return None
-
-    kind = match.group(1).title()
-    item_name = match.group("name").strip()
-    return {
-        "ocr_text": _display_ocr_text(raw),
-        "matched": f"{kind}: {item_name}",
-        "matched_key": normalize_text(item_name),
-        "item_id": None,
-        "api_id": None,
-        "category": "Trade only",
-        "price": None,
-        "unit_price": None,
-        "quantity": 1,
-        "icon_url": None,
-        "confidence": 100.0,
-        "alignment_ok": True,
-        "needs_review": True,
-        "source": "trade_only",
-        "message": f"{kind} gems are not on the currency exchange. Check trade instead.",
-    }
-
-
-def _matched_trade_only_result(
-    raw: str,
-    item: dict[str, Any],
-    matched_name: str,
-    score: float,
-) -> dict[str, Any]:
-    matched = _field(item, "text", "Text") or _field(item, "name", "Name") or matched_name
-    return {
-        "ocr_text": _display_ocr_text(raw),
-        "matched": matched,
-        "matched_key": matched_name,
-        "item_id": _field(item, "item_id", "ItemId"),
-        "api_id": _field(item, "api_id", "ApiId"),
-        "category": "Trade only",
-        "price": None,
-        "unit_price": None,
-        "quantity": _quantity(raw),
-        "icon_url": _icon_url(item),
-        "confidence": score,
-        "alignment_ok": False,
-        "needs_review": True,
-        "source": "trade_only",
-        "message": "Skill and support gems are not on the currency exchange. Check trade instead.",
-    }
-
-
-def _is_trade_only_category(category: Any) -> bool:
-    return isinstance(category, str) and category.casefold() in TRADE_ONLY_CATEGORIES
 
 
 def _candidate_names(item: dict[str, Any]) -> set[str]:

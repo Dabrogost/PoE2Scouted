@@ -725,7 +725,6 @@ HTML = """
       color: #ffd8a8;
     }
 
-    .trade-only td { color: #c9d7ff; }
 
     .unmatched td { color: #ffd8a8; }
 
@@ -1122,7 +1121,7 @@ HTML = """
       }
 
       resultBody.innerHTML = results.map((row) => `
-        <tr class="${row.source === "unmatched" ? "unmatched" : row.source === "trade_only" ? "trade-only" : row.needs_review ? "needs-review" : ""}">
+        <tr class="${row.source === "unmatched" ? "unmatched" : row.needs_review ? "needs-review" : ""}">
           <td>${escapeHtml(row.ocr_text)}</td>
           <td>
             <div class="match-cell">
@@ -1132,7 +1131,7 @@ HTML = """
           </td>
           <td>${escapeHtml(formatPrice(row.price))}${priceNote(row)}</td>
           <td>${escapeHtml(row.category)}</td>
-          <td>${row.source === "trade_only" ? "Trade" : row.source === "unmatched" ? "Review" : `<span class="confidence">${Math.round(row.confidence)}</span>`}</td>
+          <td>${row.source === "unmatched" ? "Review" : `<span class="confidence">${Math.round(row.confidence)}</span>`}</td>
         </tr>
       `).join("");
     }

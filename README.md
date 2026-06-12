@@ -46,9 +46,8 @@ This app can price items that exist in Poe2Scout's item list for the selected le
 - Essences
 - Omens
 - Fragments
+- Skill gems, support gems, and lineage support gems that Poe2Scout exposes with prices
 - Other Poe2Scout-supported item categories
-
-Skill gems and support gems are not priced through this app. They are not on the currency exchange, so OCR rows like `Skill: Repulsion` or `Support: Concussive Runes` are classified as `Trade only` and shown with a note to check trade instead. Poe2Scout gem categories such as `lineagesupportgems` are also treated as `Trade only` if OCR accidentally matches them.
 
 It does not inspect rare item affixes, calculate DPS, evaluate rolls, or query the official trade site for comparable rare items. A rare item may match only by base name, which is not enough for real rare-gear pricing.
 
@@ -108,8 +107,6 @@ The result table shows:
 | Price | `CurrentPrice` from Poe2Scout for the selected league, shown as exalted. |
 | Category | `CategoryApiId` from Poe2Scout. |
 | Confidence | RapidFuzz `WRatio` score, rounded in the UI. |
-
-For skill/support gem rows, the table shows `Trade only` and a note instead of a Poe2Scout price.
 
 Rows below the review threshold are highlighted and returned with `needs_review: true`. Rows can also be marked for review when the fuzzy score is high but the OCR text and matched item do not share enough meaningful tokens. They are shown so you can inspect weak matches instead of the app silently hiding uncertainty.
 
@@ -202,7 +199,7 @@ OCR text is normalized by:
 
 Matches use RapidFuzz `fuzz.WRatio`. Results are sorted by Poe2Scout `CurrentPrice` descending and capped at 50 rows. Confidence is only used as a tie-breaker for equal prices.
 
-Before fuzzy matching, rows beginning with `Skill:` or `Support:` are classified as `Trade only`. After fuzzy matching, matched skill/support gem categories are also converted to `Trade only` rows with no price. This prevents skill/support gem names from being matched against unrelated currency-exchange items or shown as currency-exchange prices.
+Rows beginning with `Skill:` or `Support:` are normalized by removing that label before matching. If Poe2Scout exposes the gem with a `CurrentPrice`, such as `lineagesupportgems` entries, the app prices it normally.
 
 After fuzzy matching, the app also checks meaningful token alignment. Generic words such as `skill`, `support`, `rune`, `runes`, `of`, `the`, and `pile` do not count as strong evidence by themselves. This prevents lines like `Skill: Repulsion` from being treated as a confident match for an unrelated item such as `Vilenta's Propulsion`.
 
@@ -340,7 +337,7 @@ league: Runes of Aldur
 
 ### Results look wrong
 
-OCR can misread game fonts. Use the OCR Lines panel to see what the model actually saw, then inspect rows with low confidence. The app is designed to flag weak matches rather than pretend they are certain. Skill and support gems are deliberately marked as `Trade only` because they are not currency-exchange price entries.
+OCR can misread game fonts. Use the OCR Lines panel to see what the model actually saw, then inspect rows with low confidence. The app is designed to flag weak matches rather than pretend they are certain.
 
 ### No rare gear price
 
@@ -371,7 +368,7 @@ Check installed dependencies:
 
 The live endpoint was smoke-tested by posting a generated image containing `Chaos Orb`. EasyOCR read it imperfectly as `ChacsOrb`, and RapidFuzz still matched it to Poe2Scout's `Chaos Orb` with confidence around 82.
 
-An in-game list screenshot containing rows such as `Skill: Conductive Runes`, `Skill: Repulsion`, and `Verisium Pile` was also tested. EasyOCR read the main row text. `Verisium Pile` matched cleanly to `Verisium`; the skill/support rows were classified as `Trade only` instead of being fuzzy-matched against unrelated Poe2Scout items.
+An in-game list screenshot containing rows such as `Skill: Conductive Runes`, `Skill: Repulsion`, and `Verisium Pile` was also tested. EasyOCR read the main row text. `Verisium Pile` matched cleanly to `Verisium`; skill/support labels are stripped before matching so Poe2Scout-priced gems can be returned with prices.
 
 ## License
 
