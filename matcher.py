@@ -9,6 +9,7 @@ from rapidfuzz import fuzz, process
 
 NOISE_PATTERNS = (
     re.compile(r"^\d+(\.\d+)?$"),
+    re.compile(r"^[a-z0-9]{1,2}$", re.I),
     re.compile(r"^[il1]\s*x$", re.I),
     re.compile(r"^[kr][a-z]{2,8}shape\s+c[a-z]{5,12}i[a-z]{2,4}s?$", re.I),
     re.compile(r"^(level|requires|quality|armour|armor|evasion|energy shield|stack size)\b", re.I),
@@ -16,6 +17,8 @@ NOISE_PATTERNS = (
 )
 STACK_COUNT_PATTERN = re.compile(r"^\s*(?:\d+|[il])\s*x\s+", re.I)
 STACK_COUNT_CAPTURE_PATTERN = re.compile(r"^\s*(?P<count>\d+|[il])\s*x\s+", re.I)
+ITEM_LABEL_PATTERN = re.compile(r"^\s*(skill|support)\s*:", re.I)
+LABELED_ITEM_MIN_SCORE = 92
 GENERIC_TOKENS = {
     "a",
     "an",
@@ -152,6 +155,7 @@ def match_ocr_lines(
         return []
 
     results_by_key: dict[str, dict[str, Any]] = {}
+    source_indices_by_key: dict[str, set[int]] = {}
     suffixes = _detected_item_suffixes(ocr_lines, lexicon)
     evaluated_rows: list[tuple[OCRCandidate, dict[str, Any]]] = []
 
@@ -173,7 +177,7 @@ def match_ocr_lines(
     for candidate, row in evaluated_rows:
         if row.get("source") == "unmatched" and set(candidate.source_indices).issubset(covered_indices):
             continue
-        _store_result(results_by_key, row)
+        _store_result(results_by_key, row, candidate.source_indices, source_indices_by_key)
 
     return sorted(results_by_key.values(), key=_sort_key, reverse=True)[:limit]
 
@@ -186,8 +190,10 @@ def _match_candidate(
     min_score: int,
 ) -> dict[str, Any] | None:
     raw = candidate.text
+    item_label = _has_item_label(raw)
     cleaned = normalize_text(raw)
     corrected = _correct_normalized_text(cleaned, lexicon)
+    corrected = _exact_meaningful_choice(corrected, lexicon) or corrected
     if len(corrected) < 3:
         return None
     if not _meaningful_tokens(corrected):
@@ -207,6 +213,9 @@ def _match_candidate(
     item = index[matched_name]
     category = _field(item, "category_api_id", "CategoryApiId")
     alignment_ok = _has_meaningful_alignment(corrected, matched_name, score)
+    if item_label and not _is_strong_labeled_item_match(corrected, matched_name, score, min_score):
+        return _unmatched_result(raw, "No exact Poe2Scout item match for this labeled row.")
+
     quantity = _quantity(raw)
     lexicon_only = bool(item.get("_lexicon_only"))
     unit_price = None if lexicon_only else _price_to_float(_field(item, "current_price", "CurrentPrice"))
@@ -243,15 +252,30 @@ def _sort_key(row: dict[str, Any]) -> tuple[int, int, float, float]:
     )
 
 
-def _store_result(results_by_key: dict[str, dict[str, Any]], row: dict[str, Any]) -> None:
+def _store_result(
+    results_by_key: dict[str, dict[str, Any]],
+    row: dict[str, Any],
+    source_indices: tuple[int, ...],
+    source_indices_by_key: dict[str, set[int]],
+) -> None:
     key = _result_key(row)
     existing = results_by_key.get(key)
+    row_indices = set(source_indices)
     if existing is not None and row.get("source") == existing.get("source") == "poe2scout":
+        existing_indices = source_indices_by_key.setdefault(key, set())
+        if existing_indices & row_indices:
+            if _row_quality(row) > _row_quality(existing):
+                results_by_key[key] = row
+            existing_indices.update(row_indices)
+            return
+
         _merge_priced_rows(existing, row)
+        existing_indices.update(row_indices)
         return
 
     if existing is None or _row_quality(row) > _row_quality(existing):
         results_by_key[key] = row
+        source_indices_by_key[key] = row_indices
 
 
 def _result_key(row: dict[str, Any]) -> str:
@@ -428,6 +452,34 @@ def _has_meaningful_alignment(query: str, matched_name: str, score: float) -> bo
 
 def _meaningful_tokens(value: str) -> list[str]:
     return [token for token in normalize_text(value).split() if token not in GENERIC_TOKENS and len(token) > 1]
+
+
+def _has_item_label(value: str) -> bool:
+    return bool(ITEM_LABEL_PATTERN.match(value))
+
+
+def _exact_meaningful_choice(cleaned: str, lexicon: ItemLexicon) -> str | None:
+    meaningful = " ".join(_meaningful_tokens(cleaned))
+    if meaningful and meaningful != cleaned and meaningful in lexicon.choice_positions:
+        return meaningful
+
+    return None
+
+
+def _is_strong_labeled_item_match(query: str, matched_name: str, score: float, min_score: int) -> bool:
+    if query == matched_name or query in matched_name or matched_name in query:
+        return True
+
+    if score < max(min_score, LABELED_ITEM_MIN_SCORE):
+        return False
+
+    query_tokens = _meaningful_tokens(query)
+    matched_tokens = set(_meaningful_tokens(matched_name))
+    if len(query_tokens) < 2:
+        return False
+
+    exact_hits = sum(1 for token in query_tokens if token in matched_tokens)
+    return exact_hits == len(query_tokens)
 
 
 def _is_single_token_fragment(cleaned: str, lexicon: ItemLexicon) -> bool:

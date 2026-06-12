@@ -199,7 +199,7 @@ OCR text is normalized by:
 
 Matches use RapidFuzz `fuzz.WRatio`. Results are sorted by Poe2Scout `CurrentPrice` descending and capped at 50 rows. Confidence is only used as a tie-breaker for equal prices.
 
-Rows beginning with `Skill:` or `Support:` are normalized by removing that label before matching. If Poe2Scout exposes the gem with a `CurrentPrice`, such as `lineagesupportgems` entries, the app prices it normally.
+Rows beginning with `Skill:` or `Support:` are matched conservatively. If Poe2Scout exposes the labeled text as an item with a `CurrentPrice`, the app prices it normally. If not, the row stays in review with no price instead of being fuzzy-matched to unrelated runes, weapons, or currency.
 
 After fuzzy matching, the app also checks meaningful token alignment. Generic words such as `skill`, `support`, `rune`, `runes`, `of`, `the`, and `pile` do not count as strong evidence by themselves. This prevents lines like `Skill: Repulsion` from being treated as a confident match for an unrelated item such as `Vilenta's Propulsion`.
 
@@ -368,7 +368,7 @@ Check installed dependencies:
 
 The live endpoint was smoke-tested by posting a generated image containing `Chaos Orb`. EasyOCR read it imperfectly as `ChacsOrb`, and RapidFuzz still matched it to Poe2Scout's `Chaos Orb` with confidence around 82.
 
-An in-game list screenshot containing rows such as `Skill: Conductive Runes`, `Skill: Repulsion`, and `Verisium Pile` was also tested. EasyOCR read the main row text. `Verisium Pile` matched cleanly to `Verisium`; skill/support labels are stripped before matching so Poe2Scout-priced gems can be returned with prices.
+An in-game list screenshot containing rows such as `Skill: Conductive Runes`, `Skill: Repulsion`, and `Verisium Pile` was also tested. EasyOCR read the main row text. `Verisium Pile` matched cleanly to `Verisium`; skill/support labels use stricter matching so descriptor text stays unpriced instead of becoming unrelated fuzzy matches.
 
 ## License
 
